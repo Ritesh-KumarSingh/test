@@ -66,7 +66,7 @@ export default defineConfig({
       // Cross-Origin Isolation — required for SharedArrayBuffer / multi-threaded WASM.
       // Without these headers the SDK falls back to single-threaded mode.
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'credentialless',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
   assetsInclude: ['**/*.wasm'],

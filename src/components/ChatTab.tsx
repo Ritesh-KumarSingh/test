@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ModelCategory } from '@runanywhere/web';
 import { TextGeneration } from '@runanywhere/web-llamacpp';
-import { useModelLoader } from '../hooks/useModelLoader';
+import { useModelLoaderWithOverlay } from '../hooks/useModelLoaderWithOverlay';
 import { ModelBanner } from './ModelBanner';
+import { usePrivacyMonitor } from '../context/PrivacyMonitorContext';
+import { useModel } from '../context/ModelContext';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -11,12 +13,14 @@ interface Message {
 }
 
 export function ChatTab() {
-  const loader = useModelLoader(ModelCategory.Language);
+  const loader = useModelLoaderWithOverlay(ModelCategory.Language);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [generating, setGenerating] = useState(false);
   const cancelRef = useRef<(() => void) | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const { incrementTokens } = usePrivacyMonitor();
+  const { setInferenceActive, resetInference } = useModel();
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -36,6 +40,8 @@ export function ChatTab() {
     setInput('');
     setMessages((prev) => [...prev, { role: 'user', text }]);
     setGenerating(true);
+    setInferenceActive(true);
+    resetInference(); // Reset token count for new inference
 
     // Add empty assistant message for streaming
     const assistantIdx = messages.length + 1;
@@ -49,8 +55,11 @@ export function ChatTab() {
       cancelRef.current = cancel;
 
       let accumulated = '';
+      let tokenCount = 0;
       for await (const token of stream) {
         accumulated += token;
+        tokenCount++;
+        incrementTokens(1); // Increment privacy shield counter
         setMessages((prev) => {
           const updated = [...prev];
           updated[assistantIdx] = { role: 'assistant', text: accumulated };
@@ -82,8 +91,9 @@ export function ChatTab() {
     } finally {
       cancelRef.current = null;
       setGenerating(false);
+      setInferenceActive(false);
     }
-  }, [input, generating, messages.length, loader]);
+  }, [input, generating, messages.length, loader, incrementTokens, setInferenceActive, resetInference]);
 
   const handleCancel = () => {
     cancelRef.current?.();
@@ -102,22 +112,43 @@ export function ChatTab() {
       <div className="message-list" ref={listRef}>
         {messages.length === 0 && (
           <div className="empty-state">
-            <h3>Start a conversation</h3>
-            <p>Type a message below to chat with on-device AI</p>
+            <span style={{ fontSize: '48px', marginBottom: '16px' }}>💬</span>
+            <h3>Your Private AI Assistant</h3>
+            <p>Start chatting with a fully local AI model. Your conversations never leave your device.</p>
+            <p style={{ 
+              fontSize: '12px', 
+              marginTop: '16px',
+              color: 'var(--green-light)',
+              fontWeight: '600'
+            }}>
+              🔒 100% Private • ⚡ Fast • 🌐 Offline-Ready
+            </p>
           </div>
         )}
         {messages.map((msg, i) => (
           <div key={i} className={`message message-${msg.role}`}>
             <div className="message-bubble">
-              <p>{msg.text || '...'}</p>
+              <p>{msg.text || <span style={{ opacity: 0.5 }}>Thinking...</span>}</p>
               {msg.stats && (
                 <div className="message-stats">
-                  {msg.stats.tokens} tokens · {msg.stats.tokPerSec.toFixed(1)} tok/s · {msg.stats.latencyMs.toFixed(0)}ms
+                  ⚡ {msg.stats.tokens} tokens • {msg.stats.tokPerSec.toFixed(1)} tok/s • ⏱️ {msg.stats.latencyMs.toFixed(0)}ms
                 </div>
               )}
             </div>
           </div>
         ))}
+        {generating && (
+          <div className="message message-assistant">
+            <div className="message-bubble" style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '8px',
+              minHeight: '44px'
+            }}>
+              <span className="cursor-blink">|</span>
+            </div>
+          </div>
+        )}
       </div>
 
       <form
@@ -126,15 +157,25 @@ export function ChatTab() {
       >
         <input
           type="text"
-          placeholder="Message..."
+          placeholder="Type your message... (Press Enter to send)"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={generating}
+          autoFocus
         />
         {generating ? (
-          <button type="button" className="btn" onClick={handleCancel}>Stop</button>
+          <button type="button" className="btn btn-danger" onClick={handleCancel}>
+            ⏹️ Stop
+          </button>
         ) : (
-          <button type="submit" className="btn btn-primary" disabled={!input.trim()}>Send</button>
+          <button 
+            type="submit" 
+            className="btn btn-primary" 
+            disabled={!input.trim()}
+            title="Send message (Enter)"
+          >
+            ⬆️ Send
+          </button>
         )}
       </form>
     </div>
