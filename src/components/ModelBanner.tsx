@@ -1,4 +1,4 @@
-import type { LoaderState } from '../hooks/useModelLoader';
+import type { LoaderState } from '../hooks/useModelLoaderWithOverlay';
 
 interface Props {
   state: LoaderState;

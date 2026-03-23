@@ -75,7 +75,7 @@ export function ResearchModeTab() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef<(() => void) | null>(null);
   const { incrementTokens } = usePrivacyMonitor();
-  const { setInferenceActive, resetInference } = useModel();
+  const { setInferenceActive } = useModel();
   const { registerHandlers, modKey } = useKeyboardShortcuts();
 
   // Load documents from IndexedDB on mount
@@ -188,6 +188,7 @@ export function ResearchModeTab() {
     }
 
     setProcessing(true);
+    setInferenceActive(true); // Activate HUD before the async work
     setResult(null);
 
     try {
@@ -233,8 +234,6 @@ export function ResearchModeTab() {
       });
       cancelRef.current = cancel;
 
-      setInferenceActive(true);
-      resetInference(); // Reset token count for new inference
       let accumulated = '';
       for await (const token of stream) {
         accumulated += token;
@@ -270,7 +269,7 @@ export function ResearchModeTab() {
       setProcessing(false);
       setInferenceActive(false);
     }
-  }, [documents, query, loader, incrementTokens, setInferenceActive, resetInference]);
+  }, [documents, query, loader, incrementTokens, setInferenceActive]);
 
   const handleCancel = () => {
     cancelRef.current?.();

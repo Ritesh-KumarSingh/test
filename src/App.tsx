@@ -169,24 +169,33 @@ function AppContent() {
 
       {/* ── Animated main content ── */}
       <main className="tab-content" role="main">
+        {/* Dev + Research stay ALWAYS mounted so model state is preserved */}
+        <div style={{ display: activeView === 'dev' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
+          <DevModeTab />
+        </div>
+        <div style={{ display: activeView === 'research' ? 'flex' : 'none', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
+          <ResearchModeTab />
+        </div>
+
+        {/* Secondary tabs use animated mount/unmount — they don't hold model state */}
         <AnimatePresence initial={false} custom={direction} mode="wait">
-          <motion.div
-            key={activeView}
-            custom={direction}
-            variants={panelVariants}
-            initial="enter"
-            animate="center"
-            exit="exit"
-            transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
-            style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
-          >
-            {activeView === 'dev'      && <DevModeTab />}
-            {activeView === 'research' && <ResearchModeTab />}
-            {activeView === 'chat'     && <ChatTab />}
-            {activeView === 'vision'   && <VisionTab />}
-            {activeView === 'voice'    && <VoiceTab />}
-            {activeView === 'tools'    && <ToolsTab />}
-          </motion.div>
+          {isSecondaryActive && (
+            <motion.div
+              key={activeView}
+              custom={direction}
+              variants={panelVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+              style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+            >
+              {activeView === 'chat'   && <ChatTab />}
+              {activeView === 'vision' && <VisionTab />}
+              {activeView === 'voice'  && <VoiceTab />}
+              {activeView === 'tools'  && <ToolsTab />}
+            </motion.div>
+          )}
         </AnimatePresence>
       </main>
 
