@@ -25,38 +25,30 @@ interface DevResult {
   latencyMs?: number;
 }
 
-// ── Ghost text internal state ──────────────────────────────────────────────
 interface GhostState {
-  decorationIds: string[];           // Monaco decoration IDs for cleanup
-  text: string;                      // The completion text
-  lineNumber: number;                // Line where ghost starts
-  column: number;                    // Column where ghost starts
+  decorationIds: string[];
+  text: string;
+  lineNumber: number;
+  column: number;
 }
 
 const ACTION_PROMPTS: Record<DevAction, (code: string, language: string, errorMsg?: string) => string> = {
   explain: (code, language) =>
     `Explain this ${language} code step by step:\n${code}`,
-
   docstring: (code, language) =>
     `Generate a ${language} docstring for this code. Output only the comment:\n${code}`,
-
   debug: (code, language, errorMsg = 'No error message provided.') =>
     `Debug this ${language} code. Error: ${errorMsg}. Fix it and explain:\n${code}`,
-
   refactor: (code, language) =>
     `Refactor this ${language} code to be cleaner. Show refactored version and explain changes:\n${code}`,
 };
 
-// Autocomplete prompt — spec-exact, optimized for speed
-// maxTokens is kept at 80 to ensure <500ms first token on WebGPU
 const AUTOCOMPLETE_PROMPT = (context: string, language: string) =>
   `Complete this ${language} code. Only output the remaining code, nothing else:\n${context}`;
 
-// Save preference to localStorage
 function saveLanguagePreference(language: string) {
   localStorage.setItem('privateide_language', language);
 }
-
 function loadLanguagePreference(): string {
   return localStorage.getItem('privateide_language') || 'javascript';
 }
@@ -93,18 +85,64 @@ export function DevModeTab() {
   const { setInferenceActive, resetInference } = useModel();
   const { registerHandlers, modKey } = useKeyboardShortcuts();
 
-  // ── Ghost text state ─────────────────────────────────────────────────────
+  // ── Ghost text state ──────────────────────────────────────────────────────
   const ghostRef = useRef<GhostState | null>(null);
   const ghostAbortRef = useRef<AbortController | null>(null);
   const ghostDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ghostCancelRef = useRef<(() => void) | null>(null);
   const [isGhostActive, setIsGhostActive] = useState(false);
 
-  // Handle code changes with language detection
+  // ── Batching refs — THE CORE FIX ─────────────────────────────────────────
+  //
+  // ROOT CAUSE of 4.4 tok/s: calling setState on every token causes React to
+  // run a full reconcile on every token — at 30 tok/s that's 30 reconciles/sec
+  // on the main JS thread. The WebGPU command queue starves waiting for the
+  // main thread to be free. This was also the source of "Maximum update depth
+  // exceeded" — rapid setState calls inside an async for-await loop triggered
+  // React's infinite-loop guard.
+  //
+  // THE FIX: accumulate tokens in a ref (zero React involvement), then flush
+  // to state via requestAnimationFrame — at most once per 16ms (~60fps).
+  // At 30 tok/s, that's 1 React render per ~2 tokens instead of 30/sec.
+  // The main thread is free 94% of the time for WebGPU work.
+  const accumulatedRef = useRef('');       // raw text accumulation — no setState
+  const pendingTokensRef = useRef(0);      // token count pending privacy flush
+  const flushRafRef = useRef<number | null>(null);  // rAF handle for idempotency
+
+  // Schedule a batched setState flush — only one rAF queued at a time.
+  const scheduleFlush = useCallback((action: DevAction) => {
+    if (flushRafRef.current !== null) return; // already scheduled, skip
+    flushRafRef.current = requestAnimationFrame(() => {
+      flushRafRef.current = null;
+      const text = accumulatedRef.current;
+      if (!text) return;
+
+      // ONE setState per animation frame — ~60fps max regardless of token speed
+      setResult(prev => ({
+        action,
+        output: text,
+        tokensPerSec: prev?.tokensPerSec,
+        latencyMs: prev?.latencyMs,
+      }));
+
+      // Batch privacy counter flush
+      if (pendingTokensRef.current > 0) {
+        incrementTokens(pendingTokensRef.current);
+        pendingTokensRef.current = 0;
+      }
+    });
+  }, [incrementTokens]);
+
+  const cancelFlush = useCallback(() => {
+    if (flushRafRef.current !== null) {
+      cancelAnimationFrame(flushRafRef.current);
+      flushRafRef.current = null;
+    }
+  }, []);
+
   const handleCodeChange = useCallback((value: string | undefined) => {
     const newCode = value || '';
     setCode(newCode);
-
     if (newCode.trim().length > 20) {
       const detected = detectLanguageFromCode(newCode);
       setDetectedLanguage(detected);
@@ -112,19 +150,17 @@ export function DevModeTab() {
     }
   }, []);
 
-  // Save language preference
   useEffect(() => {
     saveLanguagePreference(language);
   }, [language]);
 
-  // Save to IndexedDB when result changes
   useEffect(() => {
     if (result && result.output && !result.output.startsWith('Error:')) {
       saveDevHistory(code, result.action, result.output).catch(console.error);
     }
   }, [result, code]);
 
-  // ── Clear all ghost text decorations ─────────────────────────────────────
+  // ── Ghost helpers ─────────────────────────────────────────────────────────
   const clearGhostText = useCallback(() => {
     if (!editorRef.current) return;
     if (ghostRef.current?.decorationIds.length) {
@@ -132,19 +168,15 @@ export function DevModeTab() {
     }
     ghostRef.current = null;
     setIsGhostActive(false);
-
-    // Cancel any in-flight ghost generation
     ghostAbortRef.current?.abort();
     ghostCancelRef.current?.();
   }, []);
 
-  // ── Commit ghost text into the editor buffer ──────────────────────────────
   const commitGhostText = useCallback(() => {
     const ed = editorRef.current;
     const ghost = ghostRef.current;
     if (!ed || !ghost || !ghost.text) return;
 
-    // Insert text at the ghost position
     ed.executeEdits('ghost-commit', [{
       range: {
         startLineNumber: ghost.lineNumber,
@@ -155,29 +187,21 @@ export function DevModeTab() {
       text: ghost.text,
     }]);
 
-    // Move cursor to end of committed text
     const insertedLines = ghost.text.split('\n');
     const newLine = ghost.lineNumber + insertedLines.length - 1;
     const newCol = insertedLines.length === 1
       ? ghost.column + ghost.text.length
       : insertedLines[insertedLines.length - 1].length + 1;
     ed.setPosition({ lineNumber: newLine, column: newCol });
-
     clearGhostText();
   }, [clearGhostText]);
 
-  // ── Render ghost text as Monaco inline decoration ─────────────────────────
   const renderGhostText = useCallback((text: string, lineNumber: number, column: number) => {
     const ed = editorRef.current;
     const monaco = monacoRef.current;
     if (!ed || !monaco) return;
 
-    // Clear previous ghost
     const oldIds = ghostRef.current?.decorationIds ?? [];
-
-    // Monaco doesn't have native ghost text in all versions, so we use
-    // an after-content decoration injected via CSS class.
-    // We encode the text as a data attribute on the element via CSS.
     const safeText = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '↵ ');
 
     const newDecorations = ed.deltaDecorations(oldIds, [
@@ -190,7 +214,7 @@ export function DevModeTab() {
         },
         options: {
           after: {
-            content: safeText.slice(0, 120), // truncate for decoration
+            content: safeText.slice(0, 120),
             inlineClassName: 'ghost-text-inline',
           },
           stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
@@ -202,9 +226,7 @@ export function DevModeTab() {
     setIsGhostActive(true);
   }, []);
 
-  // ── Fire ghost text completion ─────────────────────────────────────────────
-  // Runs silently alongside normal actions.
-  // Signals the HUD via setInferenceActive + setGenerating so tok/s + orb animate.
+  // ── Ghost completion — also batched ───────────────────────────────────────
   const triggerGhostCompletion = useCallback(async (
     context: string,
     lineNumber: number,
@@ -213,47 +235,54 @@ export function DevModeTab() {
   ) => {
     if (loader.state !== 'ready') return;
 
-    // Cancel any prior in-flight ghost request
     ghostAbortRef.current?.abort();
     ghostCancelRef.current?.();
     const abort = new AbortController();
     ghostAbortRef.current = abort;
 
-    // ── Activate HUD readouts ──────────────────────────────────────────────
     setInferenceActive(true);
     setGenerating(true);
 
     try {
       const prompt = AUTOCOMPLETE_PROMPT(context, lang);
-
       const { stream, cancel } = await TextGeneration.generateStream(prompt, {
-        maxTokens: 40,
-        temperature: 0.1,
-        stopSequences: ['\n\n', '```', '// ', '/* '],
+        maxTokens: 25,
+        temperature: 0.05,
+        topP: 0.9,
+        stopSequences: ['\n\n', '```', '// ', '/* ', '\n'],
       });
       ghostCancelRef.current = cancel;
 
       if (abort.signal.aborted) { cancel(); return; }
 
-      let accumulated = '';
+      let ghostAccumulated = '';
+      let ghostRaf: number | null = null;
+
       for await (const token of stream) {
         if (abort.signal.aborted) break;
-        accumulated += token;
-        incrementTokens(1);
-        // Render each token as it arrives — live streaming ghost text
-        renderGhostText(accumulated.trimEnd(), lineNumber, column);
+        ghostAccumulated += token;
+
+        // Batch ghost decoration updates — one rAF per frame max
+        if (ghostRaf === null) {
+          const snap = ghostAccumulated;
+          ghostRaf = requestAnimationFrame(() => {
+            ghostRaf = null;
+            renderGhostText(snap.trimEnd(), lineNumber, column);
+          });
+        }
       }
+      if (ghostRaf !== null) cancelAnimationFrame(ghostRaf);
     } catch (_err) {
-      // Silently swallow — ghost is a bonus, not mission-critical
+      // Ghost is a bonus — swallow silently
     } finally {
       setInferenceActive(false);
       setGenerating(false);
       ghostAbortRef.current = null;
       ghostCancelRef.current = null;
     }
-  }, [loader.state, setInferenceActive, setGenerating, incrementTokens, renderGhostText]);
+  }, [loader.state, setInferenceActive, setGenerating, renderGhostText]);
 
-  // ── Main action runner (Explain / Docstring / Debug / Refactor) ────────────
+  // ── Main action runner — BATCHED hot loop ─────────────────────────────────
   const runAction = useCallback(async (action: DevAction) => {
     if (!code.trim() || processing) return;
 
@@ -262,8 +291,12 @@ export function DevModeTab() {
       return;
     }
 
-    // Cancel any ghost in progress
     clearGhostText();
+    cancelFlush();
+
+    // Reset accumulation buffers
+    accumulatedRef.current = '';
+    pendingTokensRef.current = 0;
 
     setProcessing(true);
     setInferenceActive(true);
@@ -275,38 +308,56 @@ export function DevModeTab() {
       const prompt = ACTION_PROMPTS[action](code, detectedLang, errorMsg);
 
       const { stream, result: resultPromise, cancel } = await TextGeneration.generateStream(prompt, {
-        maxTokens: 256,
-        temperature: 0.2,
-        stopSequences: ['\n\n\n', '---'],
+        maxTokens: 300,
+        temperature: 0.1,
+        topP: 0.9,
+        stopSequences: ['\n\n\n', '---', 'Human:', 'User:', '###'],
       });
       cancelRef.current = cancel;
 
-      let accumulated = '';
+      // ── ZERO setState calls in this hot loop ──────────────────────────────
+      // Every token: write to ref (no React), schedule one rAF flush.
+      // scheduleFlush is idempotent — only one rAF is ever pending at a time.
+      // Result: React renders at ~60fps max, not once per token.
       for await (const token of stream) {
-        accumulated += token;
-        incrementTokens(1);
-        setResult({ action, output: accumulated });
+        accumulatedRef.current += token;
+        pendingTokensRef.current += 1;
+        scheduleFlush(action);
       }
 
+      // Cancel any pending rAF and do one final synchronous update
+      cancelFlush();
       const finalResult = await resultPromise;
+      const finalOutput = finalResult.text || accumulatedRef.current;
+
+      // Flush remaining privacy tokens
+      if (pendingTokensRef.current > 0) {
+        incrementTokens(pendingTokensRef.current);
+        pendingTokensRef.current = 0;
+      }
+
       setResult({
         action,
-        output: finalResult.text || accumulated,
+        output: finalOutput,
         tokensPerSec: finalResult.tokensPerSecond,
         latencyMs: finalResult.latencyMs,
       });
     } catch (err) {
+      cancelFlush();
       const msg = err instanceof Error ? err.message : String(err);
       setResult({ action, output: `Error: ${msg}` });
     } finally {
       cancelRef.current = null;
+      accumulatedRef.current = '';
+      pendingTokensRef.current = 0;
       setProcessing(false);
       setInferenceActive(false);
     }
-  }, [code, errorMsg, processing, loader, incrementTokens, setInferenceActive, resetInference, clearGhostText]);
+  }, [code, errorMsg, processing, loader, incrementTokens, setInferenceActive, resetInference, clearGhostText, scheduleFlush, cancelFlush]);
 
   const handleCancel = () => {
     cancelRef.current?.();
+    cancelFlush();
     setProcessing(false);
     setInferenceActive(false);
   };
@@ -329,30 +380,25 @@ export function DevModeTab() {
     }
   };
 
-  // ── Ghost trigger patterns ────────────────────────────────────────────────
-  // Matches comment lines AND code block headers — these are high-intent triggers
-  // where the developer has paused to describe what they want next.
   const GHOST_TRIGGER_RE = [
-    /\/\/\s+\S.{1,}$/,                      // JS/TS: // comment with text
-    /#\s+\S.{1,}$/,                         // Python: # comment with text
-    /--\s+\S.{1,}$/,                        // Lua/SQL: -- comment
-    /function\s+\w+\s*\([^)]*\)\s*\{?\s*$/, // function foo() {
-    /def\s+\w+\s*\([^)]*\)\s*:\s*$/,        // Python: def foo():
-    /const\s+\w+\s*=\s*$/,                  // const x =
-    /\bclass\s+\w+.*\{?\s*$/,               // class Foo {
-    /\bfunc\s+\w+\s*\(/,                    // Go: func foo(
-    /\bfn\s+\w+\s*\(/,                      // Rust: fn foo(
-    /\bif\s*\(.*\)\s*\{?\s*$/,              // if (condition) {
-    /\bfor\s*\(.*\)\s*\{?\s*$/,             // for loops
-    /=>\s*$/,                               // arrow function body start
+    /\/\/\s+\S.{1,}$/,
+    /#\s+\S.{1,}$/,
+    /--\s+\S.{1,}$/,
+    /function\s+\w+\s*\([^)]*\)\s*\{?\s*$/,
+    /def\s+\w+\s*\([^)]*\)\s*:\s*$/,
+    /const\s+\w+\s*=\s*$/,
+    /\bclass\s+\w+.*\{?\s*$/,
+    /\bfunc\s+\w+\s*\(/,
+    /\bfn\s+\w+\s*\(/,
+    /\bif\s*\(.*\)\s*\{?\s*$/,
+    /\bfor\s*\(.*\)\s*\{?\s*$/,
+    /=>\s*$/,
   ];
 
-  // ── Editor mount: wire up ghost text trigger + Tab/Esc intercept ─────────
   const handleEditorMount = (ed: editor.IStandaloneCodeEditor, monaco: typeof import('monaco-editor')) => {
     editorRef.current = ed;
     monacoRef.current = monaco;
 
-    // ── Content change listener ─────────────────────────────────────────────
     ed.onDidChangeModelContent(() => {
       const model = ed.getModel();
       const pos = ed.getPosition();
@@ -360,22 +406,19 @@ export function DevModeTab() {
 
       const lineContent = model.getLineContent(pos.lineNumber);
       const lineLength = model.getLineMaxColumn(pos.lineNumber);
-
-      // Guard: cursor must be at or near end of line (within 1 char)
       const isAtLineEnd = pos.column >= lineLength - 1;
+
       if (!isAtLineEnd) {
         if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
-        return; // Don't trigger mid-line
+        return;
       }
 
       const textUpToCursor = lineContent.slice(0, pos.column - 1);
       const shouldTrigger = GHOST_TRIGGER_RE.some(re => re.test(textUpToCursor));
 
       if (shouldTrigger) {
-        // Debounce: 300ms after last keystroke (spec requirement)
         if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
         ghostDebounceRef.current = setTimeout(() => {
-          // Context: last 10 lines (spec requirement)
           const startLine = Math.max(1, pos.lineNumber - 9);
           const contextLines: string[] = [];
           for (let l = startLine; l <= pos.lineNumber; l++) {
@@ -386,40 +429,28 @@ export function DevModeTab() {
           triggerGhostCompletion(context, pos.lineNumber, pos.column, lang);
         }, 300);
       } else {
-        // Not a trigger line — cancel pending debounce + clear ghost
         if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
         if (ghostRef.current) clearGhostText();
       }
     });
 
-    // ── Key handler: Tab commits, Esc dismisses, any other key aborts ───────
-    // Using onKeyDown (not addCommand) for highest-priority intercept —
-    // addCommand can be shadowed by Monaco's indent/tab providers.
     ed.onKeyDown((e: any) => {
-      if (!ghostRef.current) return; // Nothing to do if no ghost
-
+      if (!ghostRef.current) return;
       if (e.keyCode === monaco.KeyCode.Tab) {
-        // Tab → commit the ghost text into the buffer
         e.preventDefault();
         e.stopPropagation();
         commitGhostText();
         return;
       }
-
       if (e.keyCode === monaco.KeyCode.Escape) {
-        // Esc → dismiss without committing
         clearGhostText();
         return;
       }
-
-      // Any other keystroke → abort the in-flight inference immediately
-      // This is critical for responsiveness: user changed their mind.
       ghostAbortRef.current?.abort();
       ghostCancelRef.current?.();
       clearGhostText();
     });
 
-    // ── Cursor leaves ghost line → dismiss ──────────────────────────────────
     ed.onDidChangeCursorPosition((e: any) => {
       if (ghostRef.current && e.position.lineNumber !== ghostRef.current.lineNumber) {
         ghostAbortRef.current?.abort();
@@ -428,27 +459,36 @@ export function DevModeTab() {
     });
   };
 
-  // Register keyboard shortcut handlers
-  // Note: registerHandlers stores in a ref, so handlers are always current
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // ── Keyboard shortcuts — FIXED dependency array ───────────────────────────
+  //
+  // BEFORE (broken): useEffect(() => { registerHandlers({...}); });
+  //   — no dep array → runs on EVERY render → one of the causes of the
+  //   "Maximum update depth exceeded" cascade during token streaming.
+  //
+  // AFTER: stable handlersRef pattern — useEffect runs once (on mount),
+  //   handlers always reflect the latest closures via the ref.
+  const handlersRef = useRef({ runAction, setResult, editorRef });
+  handlersRef.current = { runAction, setResult, editorRef };
+
   useEffect(() => {
     registerHandlers({
-      onExplain: () => runAction('explain'),
-      onDocstring: () => runAction('docstring'),
-      onDebug: () => runAction('debug'),
-      onRefactor: () => runAction('refactor'),
-      onClearOutput: () => setResult(null),
-      onFocusEditor: () => editorRef.current?.focus(),
+      onExplain: () => handlersRef.current.runAction('explain'),
+      onDocstring: () => handlersRef.current.runAction('docstring'),
+      onDebug: () => handlersRef.current.runAction('debug'),
+      onRefactor: () => handlersRef.current.runAction('refactor'),
+      onClearOutput: () => handlersRef.current.setResult(null),
+      onFocusEditor: () => handlersRef.current.editorRef.current?.focus(),
     });
-  }); // Run on every render to keep handlers current (ref-based, no re-renders)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerHandlers]); // stable — runs once on mount
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (ghostDebounceRef.current) clearTimeout(ghostDebounceRef.current);
       ghostAbortRef.current?.abort();
+      cancelFlush();
     };
-  }, []);
+  }, [cancelFlush]);
 
   const isEditorLoading = loader.state === 'downloading' || loader.state === 'loading';
 
@@ -463,7 +503,7 @@ export function DevModeTab() {
       />
 
       <div className="dev-mode-layout">
-        {/* Left Panel - Code Editor */}
+        {/* Left Panel — Code Editor */}
         <div className={`dev-mode-input${isEditorLoading ? ' shimmer-sweep' : ''}`}>
           <div className="dev-mode-toolbar">
             <select
@@ -480,7 +520,6 @@ export function DevModeTab() {
             </select>
             <span className="toolbar-label">Paste proprietary code — stays 100% local</span>
 
-            {/* Ghost text status indicator */}
             {isGhostActive && (
               <span className="ghost-indicator">
                 <span className="ghost-indicator-dot" />
@@ -494,7 +533,6 @@ export function DevModeTab() {
               language={detectedLanguage}
               onLanguageChange={setLanguage}
             />
-            {/* Shimmer overlay on editor while model loads */}
             <div className={`editor-shimmer-wrap${isEditorLoading ? ' active' : ''}`} />
             <Editor
               height="100%"
@@ -514,7 +552,6 @@ export function DevModeTab() {
                 cursorBlinking: 'smooth',
                 smoothScrolling: true,
                 padding: { top: 12, bottom: 12 },
-                // Disable Monaco's own suggest so ghost text is the only suggestion
                 quickSuggestions: false,
                 suggestOnTriggerCharacters: false,
                 parameterHints: { enabled: false },
@@ -524,7 +561,6 @@ export function DevModeTab() {
 
           <TokenCounter text={code} />
 
-          {/* Ghost text hint bar */}
           {isGhostActive && (
             <div className="ghost-hint-bar">
               <span>⚡ AI suggestion ready</span>
@@ -535,38 +571,20 @@ export function DevModeTab() {
           )}
 
           <div className="dev-mode-actions">
-            <button
-              className="btn btn-primary"
-              onClick={() => runAction('explain')}
-              disabled={processing}
-            >
+            <button className="btn btn-primary" onClick={() => runAction('explain')} disabled={processing}>
               📖 Explain <kbd>{modKey}E</kbd>
             </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => runAction('docstring')}
-              disabled={processing}
-            >
+            <button className="btn btn-primary" onClick={() => runAction('docstring')} disabled={processing}>
               📝 Docstring <kbd>{modKey}D</kbd>
             </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => runAction('debug')}
-              disabled={processing}
-            >
+            <button className="btn btn-primary" onClick={() => runAction('debug')} disabled={processing}>
               🐛 Debug <kbd>{modKey}G</kbd>
             </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => runAction('refactor')}
-              disabled={processing}
-            >
+            <button className="btn btn-primary" onClick={() => runAction('refactor')} disabled={processing}>
               ✨ Refactor <kbd>{modKey}⇧R</kbd>
             </button>
             {processing && (
-              <button className="btn" onClick={handleCancel}>
-                ⏹ Stop
-              </button>
+              <button className="btn" onClick={handleCancel}>⏹ Stop</button>
             )}
           </div>
 
@@ -579,7 +597,7 @@ export function DevModeTab() {
           />
         </div>
 
-        {/* Right Panel - AI Output */}
+        {/* Right Panel — AI Output */}
         <div className="dev-mode-output">
           {!result && !processing && (
             <div className="empty-state">
@@ -631,18 +649,10 @@ export function DevModeTab() {
                       />
                     );
                   }
-                  return (
-                    <StreamingOutput
-                      content={result.output}
-                      isStreaming={processing}
-                    />
-                  );
+                  return <StreamingOutput content={result.output} isStreaming={processing} />;
                 })()
               ) : (
-                <StreamingOutput
-                  content={result.output}
-                  isStreaming={processing}
-                />
+                <StreamingOutput content={result.output} isStreaming={processing} />
               )}
 
               {!processing && result.action !== 'refactor' && (

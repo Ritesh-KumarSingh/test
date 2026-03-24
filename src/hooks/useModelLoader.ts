@@ -12,10 +12,10 @@ interface ModelLoaderResult {
 
 /**
  * Hook to download + load models for a given category.
- * Tracks download progress and loading state.
+ * Same performance params as useModelLoaderWithOverlay.
  *
  * @param category - Which model category to ensure is loaded.
- * @param coexist  - If true, only unload same-category models (allows STT+LLM+TTS to coexist).
+ * @param coexist  - If true, only unload same-category models (allows STT+LLM+TTS coexistence).
  */
 export function useModelLoader(category: ModelCategory, coexist = false): ModelLoaderResult {
   const [state, setState] = useState<LoaderState>(() =>
@@ -26,7 +26,6 @@ export function useModelLoader(category: ModelCategory, coexist = false): ModelL
   const loadingRef = useRef(false);
 
   const ensure = useCallback(async (): Promise<boolean> => {
-    // Already loaded
     if (ModelManager.getLoadedModel(category)) {
       setState('ready');
       return true;
@@ -36,7 +35,6 @@ export function useModelLoader(category: ModelCategory, coexist = false): ModelL
     loadingRef.current = true;
 
     try {
-      // Find a model for this category
       const models = ModelManager.getModels().filter((m) => m.modality === category);
       if (models.length === 0) {
         setError(`No ${category} model registered`);
@@ -46,7 +44,6 @@ export function useModelLoader(category: ModelCategory, coexist = false): ModelL
 
       const model = models[0];
 
-      // Download if needed
       if (model.status !== 'downloaded' && model.status !== 'loaded') {
         setState('downloading');
         setProgress(0);
@@ -62,13 +59,15 @@ export function useModelLoader(category: ModelCategory, coexist = false): ModelL
         setProgress(1);
       }
 
-      // Load with optimized params for faster inference
       setState('loading');
       const ok = await ModelManager.loadModel(model.id, {
         coexist,
-        nCtx: 1024,       // Smaller context window = faster inference
-        nBatch: 512,       // Larger batch for faster prompt processing
+        nCtx: 512,
+        nBatch: 512,
+        nGl: 99,      // GPU layer offload — all layers
+        nThreads: 4,  // CPU fallback thread count
       } as any);
+
       if (ok) {
         setState('ready');
         return true;
