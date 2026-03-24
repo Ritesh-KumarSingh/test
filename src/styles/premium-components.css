@@ -34,6 +34,40 @@
   100% { left: 100%; }
 }
 
+.model-banner-ready {
+  justify-content: space-between;
+  padding: 8px var(--space-xl);
+  background: rgba(16, 185, 129, 0.08);
+  border-bottom-color: rgba(16, 185, 129, 0.2);
+  font-size: 12px;
+  animation: fadeIn 0.4s ease-out;
+}
+
+.model-banner-ready::before {
+  display: none;
+}
+
+.backend-badge {
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.badge-gpu {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.badge-cpu {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
 .progress-bar {
   flex: 1;
   height: 8px;

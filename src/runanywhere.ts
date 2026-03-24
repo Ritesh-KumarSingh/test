@@ -99,6 +99,54 @@ const MODELS: CompactModelDef[] = [
 
 let _initPromise: Promise<void> | null = null;
 
+/** Detect WebGPU + JSPI availability and log details */
+async function diagnoseWebGPU(): Promise<boolean> {
+  console.group('🔍 WebGPU Diagnostics');
+
+  // Check navigator.gpu
+  const hasGPU = typeof navigator !== 'undefined' && 'gpu' in navigator;
+  console.log(`  navigator.gpu: ${hasGPU ? '✅ Available' : '❌ Not available'}`);
+
+  if (hasGPU) {
+    try {
+      const adapter = await (navigator as any).gpu.requestAdapter();
+      if (adapter) {
+        const info = adapter.info || {};
+        console.log(`  GPU Adapter: ✅ ${info.vendor || 'unknown'} - ${info.device || 'unknown'}`);
+        console.log(`  Architecture: ${info.architecture || 'unknown'}`);
+
+        const features = [...(adapter.features || [])];
+        console.log(`  Features: ${features.length} (${features.slice(0, 5).join(', ')}${features.length > 5 ? '...' : ''})`);
+      } else {
+        console.log('  GPU Adapter: ❌ No adapter returned');
+      }
+    } catch (err) {
+      console.log(`  GPU Adapter: ❌ Error: ${err}`);
+    }
+  }
+
+  // Check JSPI
+  const hasPromising = typeof WebAssembly !== 'undefined' && 'promising' in WebAssembly;
+  const hasSuspending = typeof WebAssembly !== 'undefined' && 'Suspending' in WebAssembly;
+  console.log(`  WebAssembly.promising: ${hasPromising ? '✅' : '❌'}`);
+  console.log(`  WebAssembly.Suspending: ${hasSuspending ? '✅' : '❌'}`);
+
+  const canUseWebGPU = hasGPU && hasPromising && hasSuspending;
+  console.log(`  ➡️ Can use WebGPU WASM: ${canUseWebGPU ? '✅ YES' : '❌ NO'}`);
+
+  if (!canUseWebGPU) {
+    if (!hasGPU) {
+      console.warn('  💡 Enable WebGPU: chrome://flags/#enable-unsafe-webgpu');
+    }
+    if (!hasPromising || !hasSuspending) {
+      console.warn('  💡 Enable JSPI: chrome://flags/#enable-experimental-webassembly-jspi');
+    }
+  }
+
+  console.groupEnd();
+  return canUseWebGPU;
+}
+
 /** Initialize the RunAnywhere SDK. Safe to call multiple times. */
 export async function initSDK(): Promise<void> {
   if (_initPromise) return _initPromise;
@@ -110,14 +158,30 @@ export async function initSDK(): Promise<void> {
       debug: true,
     });
 
-    // Step 2: Register backends (loads WASM automatically)
-    await LlamaCPP.register();
+    // Step 2: Diagnose WebGPU capability
+    const canUseWebGPU = await diagnoseWebGPU();
+
+    // Step 3: Register LlamaCPP with best available acceleration
+    if (canUseWebGPU) {
+      try {
+        await LlamaCPP.register({ acceleration: 'webgpu' });
+        console.log(`🚀 LlamaCPP loaded with: ${LlamaCPP.accelerationMode.toUpperCase()}`);
+      } catch (err) {
+        console.warn(`⚠️ WebGPU WASM failed: ${err}. Falling back to CPU...`);
+        await LlamaCPP.register({ acceleration: 'cpu' });
+        console.log(`⚙️ LlamaCPP loaded with: ${LlamaCPP.accelerationMode.toUpperCase()} (fallback)`);
+      }
+    } else {
+      await LlamaCPP.register({ acceleration: 'cpu' });
+      console.log(`⚙️ LlamaCPP loaded with: CPU (WebGPU not available)`);
+    }
+
     await ONNX.register();
 
-    // Step 3: Register model catalog
+    // Step 4: Register model catalog
     RunAnywhere.registerModels(MODELS);
 
-    // Step 4: Wire up VLM worker
+    // Step 5: Wire up VLM worker
     VLMWorkerBridge.shared.workerUrl = vlmWorkerUrl;
     RunAnywhere.setVLMLoader({
       get isInitialized() { return VLMWorkerBridge.shared.isInitialized; },

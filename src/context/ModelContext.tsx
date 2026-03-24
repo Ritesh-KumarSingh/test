@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode } from 'react';
+import { getAccelerationMode } from '../runanywhere';
 
 type Backend = 'webgpu' | 'wasm';
 
@@ -38,26 +39,37 @@ export function ModelProvider({ children }: { children: ReactNode }) {
   useEffect(() => { startTimeRef.current = inferenceStartTime; }, [inferenceStartTime]);
   useEffect(() => { inferenceActiveRef.current = inferenceActive; }, [inferenceActive]);
 
-  // Detect WebGPU support on mount
+  // Read actual acceleration mode from SDK (ground truth)
+  // Use a ref to track if we already confirmed the backend to avoid re-renders
+  const backendConfirmedRef = useRef(false);
+
   useEffect(() => {
-    const detectBackend = async () => {
-      if ('gpu' in navigator) {
-        try {
-          const gpu = (navigator as any).gpu;
-          const adapter = await gpu.requestAdapter();
-          if (adapter) {
-            setBackend('webgpu');
-            console.log('✅ WebGPU acceleration enabled');
-            return;
-          }
-        } catch (err) {
-          console.warn('WebGPU detection failed:', err);
-        }
-      }
-      setBackend('wasm');
-      console.log('⚙️ Running on CPU via WASM');
+    let timer: ReturnType<typeof setTimeout>;
+    let interval: ReturnType<typeof setInterval>;
+
+    const checkBackend = () => {
+      if (backendConfirmedRef.current) return; // Already confirmed, skip
+
+      const mode = getAccelerationMode();
+      if (mode === null) return; // SDK not initialized yet
+
+      const newBackend: Backend = mode === 'webgpu' ? 'webgpu' : 'wasm';
+      backendConfirmedRef.current = true; // Only set once
+      setBackend(newBackend);
+      console.log(newBackend === 'webgpu'
+        ? '✅ WebGPU acceleration confirmed by SDK'
+        : `⚙️ Running on CPU via WASM (SDK mode: ${mode})`);
+
+      // Clear the interval once confirmed
+      clearInterval(interval);
     };
-    detectBackend();
+
+    // Check after a short delay to allow SDK init to complete
+    timer = setTimeout(checkBackend, 2000);
+    // Re-check periodically until SDK inits
+    interval = setInterval(checkBackend, 5000);
+
+    return () => { clearTimeout(timer); clearInterval(interval); };
   }, []);
 
   // ── Calculate tok/s every 500ms — uses refs, never re-subscribes ──────────

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
+import { createContext, useContext, useEffect, useState, useRef, ReactNode, useCallback } from 'react';
 
 // Detect Mac vs non-Mac
 const isMac = navigator.platform.includes('Mac');
@@ -32,15 +32,17 @@ interface KeyboardShortcutsContextType {
 const KeyboardShortcutsContext = createContext<KeyboardShortcutsContextType | undefined>(undefined);
 
 export function KeyboardShortcutsProvider({ children }: { children: ReactNode }) {
-  const [handlers, setHandlers] = useState<ShortcutHandlers>({});
+  // Use a ref for handlers to avoid re-renders when handlers are registered
+  const handlersRef = useRef<ShortcutHandlers>({});
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
 
   const registerHandlers = useCallback((newHandlers: ShortcutHandlers) => {
-    setHandlers(prev => ({ ...prev, ...newHandlers }));
+    handlersRef.current = { ...handlersRef.current, ...newHandlers };
   }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const h = handlersRef.current; // Read from ref, always current
       // Guard: skip if in text input or Monaco editor
       const activeEl = document.activeElement;
       const isInInput = activeEl instanceof HTMLInputElement || 
@@ -63,97 +65,96 @@ export function KeyboardShortcutsProvider({ children }: { children: ReactNode })
       // Cmd/Ctrl+E - Explain
       if (cmdOrCtrl && e.key === 'e' && !shift) {
         e.preventDefault();
-        handlers.onExplain?.();
+        h.onExplain?.();
         return;
       }
 
       // Cmd/Ctrl+D - Docstring (prevent browser bookmark)
       if (cmdOrCtrl && e.key === 'd' && !shift) {
         e.preventDefault();
-        handlers.onDocstring?.();
+        h.onDocstring?.();
         return;
       }
 
       // Cmd/Ctrl+G - Debug
       if (cmdOrCtrl && e.key === 'g' && !shift) {
         e.preventDefault();
-        handlers.onDebug?.();
+        h.onDebug?.();
         return;
       }
 
       // Cmd/Ctrl+Shift+R - Refactor
       if (cmdOrCtrl && shift && e.key === 'R') {
         e.preventDefault();
-        handlers.onRefactor?.();
+        h.onRefactor?.();
         return;
       }
 
       // Cmd/Ctrl+L - Clear output
       if (cmdOrCtrl && e.key === 'l' && !shift) {
         e.preventDefault();
-        handlers.onClearOutput?.();
+        h.onClearOutput?.();
         return;
       }
 
       // Cmd/Ctrl+K - Focus editor
       if (cmdOrCtrl && e.key === 'k' && !shift) {
         e.preventDefault();
-        handlers.onFocusEditor?.();
+        h.onFocusEditor?.();
         return;
       }
 
       // Cmd/Ctrl+U - Open PDF picker
       if (cmdOrCtrl && e.key === 'u' && !shift) {
         e.preventDefault();
-        handlers.onOpenPdfPicker?.();
+        h.onOpenPdfPicker?.();
         return;
       }
 
       // Cmd/Ctrl+Enter - Submit question
       if (cmdOrCtrl && e.key === 'Enter' && !shift) {
         e.preventDefault();
-        handlers.onSubmitQuestion?.();
+        h.onSubmitQuestion?.();
         return;
       }
 
       // Cmd/Ctrl+Shift+O - Generate Outline
       if (cmdOrCtrl && shift && e.key === 'O') {
         e.preventDefault();
-        handlers.onGenerateOutline?.();
+        h.onGenerateOutline?.();
         return;
       }
 
       // Cmd/Ctrl+Shift+C - Format Citations
       if (cmdOrCtrl && shift && e.key === 'C') {
         e.preventDefault();
-        handlers.onFormatCitations?.();
+        h.onFormatCitations?.();
         return;
       }
 
       // Cmd/Ctrl+1 - Switch to Dev Mode
       if (cmdOrCtrl && e.key === '1' && !shift) {
         e.preventDefault();
-        handlers.onSwitchToDevMode?.();
+        h.onSwitchToDevMode?.();
         return;
       }
 
       // Cmd/Ctrl+2 - Switch to Research Mode
       if (cmdOrCtrl && e.key === '2' && !shift) {
         e.preventDefault();
-        handlers.onSwitchToResearchMode?.();
+        h.onSwitchToResearchMode?.();
         return;
       }
 
       // Cmd/Ctrl+3 - Switch to Chat
       if (cmdOrCtrl && e.key === '3' && !shift) {
         e.preventDefault();
-        handlers.onSwitchToChat?.();
+        h.onSwitchToChat?.();
         return;
       }
 
       // Escape - Close shortcuts modal
-      if (e.key === 'Escape' && showShortcutsModal) {
-        e.preventDefault();
+      if (e.key === 'Escape') {
         setShowShortcutsModal(false);
         return;
       }
@@ -161,7 +162,7 @@ export function KeyboardShortcutsProvider({ children }: { children: ReactNode })
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handlers, showShortcutsModal]);
+  }, []); // Empty deps — ref is always current
 
   return (
     <KeyboardShortcutsContext.Provider

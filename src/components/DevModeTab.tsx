@@ -35,22 +35,22 @@ interface GhostState {
 
 const ACTION_PROMPTS: Record<DevAction, (code: string, language: string, errorMsg?: string) => string> = {
   explain: (code, language) =>
-    `You are a code explainer. The following is ${language} code. Explain what it does in plain English, step by step, for a developer who is reading it for the first time. Code:\n${code}`,
+    `Explain this ${language} code step by step:\n${code}`,
 
   docstring: (code, language) =>
-    `You are a documentation generator. Generate a complete ${language} docstring or JSDoc comment for the following code. Output only the comment block, nothing else. Code:\n${code}`,
+    `Generate a ${language} docstring for this code. Output only the comment:\n${code}`,
 
   debug: (code, language, errorMsg = 'No error message provided.') =>
-    `You are a debugger. The following ${language} code has a bug or error. Error message: ${errorMsg}. Analyse the root cause and provide a corrected version of the code with an explanation of what was wrong. Code:\n${code}`,
+    `Debug this ${language} code. Error: ${errorMsg}. Fix it and explain:\n${code}`,
 
   refactor: (code, language) =>
-    `You are a senior ${language} engineer. Refactor the following code to be cleaner, more idiomatic, and more maintainable. Show the refactored version and briefly explain each change. Code:\n${code}`,
+    `Refactor this ${language} code to be cleaner. Show refactored version and explain changes:\n${code}`,
 };
 
 // Autocomplete prompt — spec-exact, optimized for speed
 // maxTokens is kept at 80 to ensure <500ms first token on WebGPU
 const AUTOCOMPLETE_PROMPT = (context: string, language: string) =>
-  `You are a high-speed inline code completion engine. Complete the following ${language} snippet. Provide ONLY the remaining code. No explanations. No markdown. No code fences. Code:\n${context}`;
+  `Complete this ${language} code. Only output the remaining code, nothing else:\n${context}`;
 
 // Save preference to localStorage
 function saveLanguagePreference(language: string) {
@@ -227,8 +227,8 @@ export function DevModeTab() {
       const prompt = AUTOCOMPLETE_PROMPT(context, lang);
 
       const { stream, cancel } = await TextGeneration.generateStream(prompt, {
-        maxTokens: 80,        // Short → fast. Speed > accuracy at hackathons.
-        temperature: 0.1,    // Very deterministic for code
+        maxTokens: 40,
+        temperature: 0.1,
         stopSequences: ['\n\n', '```', '// ', '/* '],
       });
       ghostCancelRef.current = cancel;
@@ -275,8 +275,9 @@ export function DevModeTab() {
       const prompt = ACTION_PROMPTS[action](code, detectedLang, errorMsg);
 
       const { stream, result: resultPromise, cancel } = await TextGeneration.generateStream(prompt, {
-        maxTokens: 800,
-        temperature: 0.3,
+        maxTokens: 256,
+        temperature: 0.2,
+        stopSequences: ['\n\n\n', '---'],
       });
       cancelRef.current = cancel;
 
@@ -428,6 +429,8 @@ export function DevModeTab() {
   };
 
   // Register keyboard shortcut handlers
+  // Note: registerHandlers stores in a ref, so handlers are always current
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     registerHandlers({
       onExplain: () => runAction('explain'),
@@ -437,7 +440,7 @@ export function DevModeTab() {
       onClearOutput: () => setResult(null),
       onFocusEditor: () => editorRef.current?.focus(),
     });
-  }, [registerHandlers, runAction]);
+  }); // Run on every render to keep handlers current (ref-based, no re-renders)
 
   // Cleanup on unmount
   useEffect(() => {

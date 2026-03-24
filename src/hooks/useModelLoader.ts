@@ -62,9 +62,13 @@ export function useModelLoader(category: ModelCategory, coexist = false): ModelL
         setProgress(1);
       }
 
-      // Load
+      // Load with optimized params for faster inference
       setState('loading');
-      const ok = await ModelManager.loadModel(model.id, { coexist });
+      const ok = await ModelManager.loadModel(model.id, {
+        coexist,
+        nCtx: 1024,       // Smaller context window = faster inference
+        nBatch: 512,       // Larger batch for faster prompt processing
+      } as any);
       if (ok) {
         setState('ready');
         return true;

@@ -49,8 +49,9 @@ export function ChatTab() {
 
     try {
       const { stream, result: resultPromise, cancel } = await TextGeneration.generateStream(text, {
-        maxTokens: 512,
-        temperature: 0.7,
+        maxTokens: 256,
+        temperature: 0.5,
+        stopSequences: ['\n\n\n', '---', 'User:', 'Human:'],
       });
       cancelRef.current = cancel;
 

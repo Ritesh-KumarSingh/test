@@ -1,4 +1,5 @@
 import type { LoaderState } from '../hooks/useModelLoaderWithOverlay';
+import { useModel } from '../context/ModelContext';
 
 interface Props {
   state: LoaderState;
@@ -9,7 +10,18 @@ interface Props {
 }
 
 export function ModelBanner({ state, progress, error, onLoad, label }: Props) {
-  if (state === 'ready') return null;
+  const { backend } = useModel();
+
+  if (state === 'ready') {
+    return (
+      <div className="model-banner model-banner-ready">
+        <span>✅ {label} ready</span>
+        <span className={`backend-badge ${backend === 'webgpu' ? 'badge-gpu' : 'badge-cpu'}`}>
+          {backend === 'webgpu' ? '⚡ WebGPU' : '🐢 WASM (CPU — slower)'}
+        </span>
+      </div>
+    );
+  }
 
   const isLoading = state === 'downloading' || state === 'loading';
 
